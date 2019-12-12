@@ -16,6 +16,7 @@ import socket
 import time
 import utility
 import nets
+from efficientnet_pytorch import EfficientNet
 
 
 def train(train_loader: torch.utils.data.DataLoader, model: nn.Module, criterion: nn.Module, optimizer, epoch, f_id):
@@ -61,12 +62,14 @@ if __name__ == '__main__':
     args.add_argument('--epoch', help='iteration times', default=50, type=int)
     args.add_argument('--batch_size', help='batch size', default=16, type=int)
     args.add_argument('--cuda_device', help='index of cuda device', default='3', type=str)
+    args.add_argument('--multiGPU', help='whther to use gpus to train model', default='false', type=str)
     args.add_argument('--type', help='train or test', default='train', type=str)
     args = args.parse_args()
     os.environ["CUDA_VISIBLE_DEVICES"] = args.cuda_device
     print('record loss: {}'.format(args.record))
     print('iteration times: {}'.format(args.epoch))
     print('batch size: {}'.format(args.batch_size))
+    print('useMultiGPUs? {}'.format(args.multiGPU))
     manualSeed = 10
     random.seed(manualSeed)
     np.random.seed(manualSeed)
@@ -84,7 +87,9 @@ if __name__ == '__main__':
     # model = models.resnet50(pretrained=True)  # type:nn.Module
     # num_ftrs = model.fc.in_features
     # model.fc = nn.Linear(num_ftrs, params.num_classes)
-    model = nets.resnext50_elastic(num_classes=params.num_classes)  # type:nn.Module
+    # model = nets.resnext101_elastic(num_classes=params.num_classes)  # type:nn.Module
+    model = EfficientNet.from_pretrained('efficientnet-b5', num_classes=params.num_classes)
+    print('model type: {}'.format(type(model)))
     criterion = nn.CrossEntropyLoss()
     optimizer = torch.optim.SGD(model.parameters(), params.lr, momentum=params.momentum,
                                 weight_decay=params.weight_decay)
@@ -105,6 +110,7 @@ if __name__ == '__main__':
         traindir,
         transforms.Compose([
             transforms.RandomResizedCrop(224),
+            transforms.RandomRotation(45),
             transforms.RandomHorizontalFlip(),
             transforms.ToTensor(),
             normalize,
@@ -132,19 +138,31 @@ if __name__ == '__main__':
         if args.model_path is not None:
             model.load_state_dict(torch.load(args.model_path, map_location='cpu'))
             print('loading model from {}'.format(args.model_path))
+        if args.multiGPU == 'true' and torch.cuda.device_count() > 1:
+            model = nn.DataParallel(model)
+            print('model being parallelize')
         model = model.to(device)
         criterion = criterion.to(device)
         for epoch in range(args.epoch):
             utility.adjust_learning_rate(optimizer, epoch, params.lr)
             train(train_loader, model, criterion, optimizer, epoch, f_id)
-            torch.save(model.state_dict(), params.model_dir + 'training_net')
+            if args.multiGPU == 'true' and torch.cuda.device_count() > 1:
+                torch.save(model.module.state_dict(), params.model_dir + 'training_net')
+            else:
+                torch.save(model.state_dict(), params.model_dir + 'training_net')
         t = time.strftime('%Y_%m_%d_%H_%M', time.localtime())
-        torch.save(model.state_dict(), params.model_dir + 'net_' + t)
+        cp = {}
+        cp['idx_to_class'] = idx_to_class
+        if args.multiGPU == 'true' and torch.cuda.device_count() > 1:
+            torch.save(model.module.state_dict(), params.model_dir + 'net_' + t)
+            cp['state_dict'] = model.module.state_dict()
+            cp['model'] = model.module
+        else:
+            torch.save(model.state_dict(), params.model_dir + 'net_' + t)
+            cp['state_dict'] = model.state_dict()
+            cp['model'] = model
         os.remove(params.model_dir + 'training_net')
         os.rename(params.model_dir + 'training_loss.txt', params.model_dir + 'loss_' + t + '.txt')
-        cp = {}
-        cp['state_dict'] = model.state_dict()
-        cp['idx_to_class'] = idx_to_class
         torch.save(cp, params.model_dir + 'model_' + t)
         f_id.close()
     else:

@@ -35,7 +35,8 @@ class ImageClassificationService():
             self.use_cuda = True
             checkpoint = torch.load(self.model_path)
             # self.model = torch.nn.DataParallel(self.model).cuda()
-            self.model.load_state_dict(checkpoint['state_dict'])
+            # self.model.load_state_dict(checkpoint['state_dict'])
+            self.model = checkpoint['model']
         else:
             print('Using CPU for inference')
             checkpoint = torch.load(self.model_path, map_location='cpu')
@@ -47,7 +48,8 @@ class ImageClassificationService():
             for key, value in checkpoint['state_dict'].items():
                 tmp = key[7:]
                 state_dict[tmp] = value
-            self.model.load_state_dict(checkpoint['state_dict'])
+            # self.model.load_state_dict(checkpoint['state_dict'])
+            self.model = checkpoint['model']
 
         self.model.eval()
 
@@ -205,23 +207,28 @@ def infer_on_dataset(img_dir, model_path):
         return None
 
     infer = ImageClassificationService('', model_path)
-    files = os.listdir(img_dir)
-    for file_name in files:
-        if not file_name.endswith('jpg'):
-            continue
-
-        gt_label = "0"
-
-        img_path = os.path.join(img_dir, file_name)
-        img = Image.open(img_path)
-        img = infer.transforms(img)
-        result = infer._inference({"input_img": img})
-        pred_label = result.get('result', 'error')
-
-        print('predict result: {}'.format(pred_label))
+    dirs = os.listdir(img_dir)
+    for dir in dirs:
+        sub_img_dir = os.path.join(img_dir, dir)
+        files = os.listdir(sub_img_dir)
+        sum = len(files)
+        right_cnt = 0
+        for file_name in files:
+            if not file_name.endswith('jpg'):
+                continue
+            img_path = os.path.join(sub_img_dir, file_name)
+            img = Image.open(img_path)
+            img = infer.transforms(img)
+            result = infer._inference({"input_img": img})
+            pred_label = result.get('result', 'error')
+            # print('predict result: {}'.format(pred_label))
+            if pred_label == infer.label_id_name_dict[dir]:
+                right_cnt += 1
+        print('dir {0} accuracy: {1}'.format(dir, right_cnt / sum))
 
 
 if __name__ == '__main__':
+    os.environ["CUDA_VISIBLE_DEVICES"] = '3'
     hostname = socket.gethostname()
     if hostname == 'DESKTOP-JBG1JGC':
         data_dir_root = 'C:/Users/xiangpu/Downloads/src_v2_20191120/HUAWEI/'
@@ -230,5 +237,5 @@ if __name__ == '__main__':
     traindir = data_dir_root + 'train/'
     valdir = data_dir_root + 'val/'
     img_dir = traindir + '1/'
-    model_path = 'trained_models/model_2019_12_09_17_37'
-    infer_on_dataset(img_dir, model_path)
+    model_path = 'trained_models/model_2019_12_12_15_30'
+    infer_on_dataset(traindir, model_path)

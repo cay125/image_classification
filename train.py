@@ -31,6 +31,10 @@ def train(train_loader: torch.utils.data.DataLoader, model: nn.Module, criterion
         target = target.to(device)
         output = model(images)
         loss = criterion(output, target)
+        if args.hard_sample_mining == 'true':
+            topk = int(0.7 * loss.shape[0])
+            loss, _ = torch.topk(loss, topk)
+            loss = torch.mean(loss)
 
         optimizer.zero_grad()
         loss.backward()
@@ -64,6 +68,8 @@ if __name__ == '__main__':
     args.add_argument('--cuda_device', help='index of cuda device', default='3', type=str)
     args.add_argument('--multiGPU', help='whther to use gpus to train model', default='false', type=str)
     args.add_argument('--type', help='train or test', default='train', type=str)
+    args.add_argument('--hard_sample_mining', help='enable hard sample mining', default='false', type=str)
+    args.add_argument('--elastic', help='enable elastic arch', default='false', type=str)
     args = args.parse_args()
     os.environ["CUDA_VISIBLE_DEVICES"] = args.cuda_device
     print('record loss: {}'.format(args.record))
@@ -88,9 +94,14 @@ if __name__ == '__main__':
     # num_ftrs = model.fc.in_features
     # model.fc = nn.Linear(num_ftrs, params.num_classes)
     # model = nets.resnext101_elastic(num_classes=params.num_classes)  # type:nn.Module
-    model = EfficientNet.from_pretrained('efficientnet-b5', num_classes=params.num_classes)
+    model = EfficientNet.from_pretrained('efficientnet-b5', num_classes=params.num_classes,
+                                         elastic=True if args.elastic == 'true' else False)
     print('model type: {}'.format(type(model)))
-    criterion = nn.CrossEntropyLoss()
+    if args.hard_sample_mining == 'true':
+        print('use hard sample mining strategy')
+        criterion = nn.CrossEntropyLoss(reduction='none')
+    else:
+        criterion = nn.CrossEntropyLoss()
     optimizer = torch.optim.SGD(model.parameters(), params.lr, momentum=params.momentum,
                                 weight_decay=params.weight_decay)
 
@@ -109,8 +120,8 @@ if __name__ == '__main__':
     train_dataset = datasets.ImageFolder(
         traindir,
         transforms.Compose([
-            transforms.RandomResizedCrop(224),
             transforms.RandomRotation(45),
+            transforms.RandomResizedCrop(224),
             transforms.RandomHorizontalFlip(),
             transforms.ToTensor(),
             normalize,

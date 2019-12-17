@@ -70,6 +70,7 @@ if __name__ == '__main__':
     args.add_argument('--type', help='train or test', default='train', type=str)
     args.add_argument('--hard_sample_mining', help='enable hard sample mining', default='false', type=str)
     args.add_argument('--elastic', help='enable elastic arch', default='false', type=str)
+    args.add_argument('--cbam', help='enable cbam arch', default='false', type=str)
     args = args.parse_args()
     os.environ["CUDA_VISIBLE_DEVICES"] = args.cuda_device
     print('record loss: {}'.format(args.record))
@@ -95,15 +96,16 @@ if __name__ == '__main__':
     # model.fc = nn.Linear(num_ftrs, params.num_classes)
     # model = nets.resnext101_elastic(num_classes=params.num_classes)  # type:nn.Module
     model = EfficientNet.from_pretrained('efficientnet-b5', num_classes=params.num_classes,
-                                         elastic=True if args.elastic == 'true' else False)
+                                         elastic=True if args.elastic == 'true' else False,
+                                         cbam=True if args.cbam == 'true' else False)
     print('model type: {}'.format(type(model)))
     if args.hard_sample_mining == 'true':
         print('use hard sample mining strategy')
         criterion = nn.CrossEntropyLoss(reduction='none')
     else:
         criterion = nn.CrossEntropyLoss()
-    optimizer = torch.optim.SGD(model.parameters(), params.lr, momentum=params.momentum,
-                                weight_decay=params.weight_decay)
+    optimizer = torch.optim.SGD(model.parameters(), params.lr if args.model_path is None else 0.001,
+                                momentum=params.momentum, weight_decay=params.weight_decay)
 
     # Data loading code
     hostname = socket.gethostname()
@@ -146,8 +148,16 @@ if __name__ == '__main__':
                                              num_workers=params.workers, pin_memory=True)
 
     if args.type == 'train':
+        # for m in model.modules():
+        #     if isinstance(m, (nn.Conv2d, nn.Linear)):
+        #         nn.init.kaiming_normal_(m.weight)
         if args.model_path is not None:
-            model.load_state_dict(torch.load(args.model_path, map_location='cpu'))
+            res = model.load_state_dict(torch.load(args.model_path, map_location='cpu'), strict=False)
+            if res.missing_keys is not None and len(res.missing_keys) != 0:
+                for missing_key in res.missing_keys:
+                    if ('elastic' not in missing_key) and ('cbam' not in missing_key):
+                        raise RuntimeError('load state dict error')
+                print('missing keys only from elastic and cbam arch')
             print('loading model from {}'.format(args.model_path))
         if args.multiGPU == 'true' and torch.cuda.device_count() > 1:
             model = nn.DataParallel(model)
@@ -155,7 +165,8 @@ if __name__ == '__main__':
         model = model.to(device)
         criterion = criterion.to(device)
         for epoch in range(args.epoch):
-            utility.adjust_learning_rate(optimizer, epoch, params.lr)
+            if args.model_path is None:
+                utility.adjust_learning_rate(optimizer, epoch, params.lr)
             train(train_loader, model, criterion, optimizer, epoch, f_id)
             if args.multiGPU == 'true' and torch.cuda.device_count() > 1:
                 torch.save(model.module.state_dict(), params.model_dir + 'training_net')

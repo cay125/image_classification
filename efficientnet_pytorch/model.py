@@ -1,6 +1,7 @@
 import torch
 from torch import nn
 from torch.nn import functional as F
+from .cbam import CBAM
 
 from .utils import (
     round_filters,
@@ -27,7 +28,7 @@ class MBConvBlock(nn.Module):
         has_se (bool): Whether the block contains a Squeeze and Excitation layer.
     """
 
-    def __init__(self, block_args, global_params, elastic: bool):
+    def __init__(self, block_args, global_params, elastic: bool = False, cbam: bool = False):
         super().__init__()
         self._block_args = block_args
         self._bn_mom = 1 - global_params.batch_norm_momentum
@@ -82,9 +83,12 @@ class MBConvBlock(nn.Module):
 
         # elastic arch
         self._elastic = elastic
+        self._cbam = cbam
         if elastic:
             self.elastic_down = nn.AvgPool2d(2, stride=2)
             self.elastic_ups = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False)
+        if cbam:
+            self.cbam_module = CBAM(gate_channels=self._block_args.output_filters)
 
     def forward(self, inputs, drop_connect_rate=None):
         """
@@ -129,6 +133,10 @@ class MBConvBlock(nn.Module):
                 x_d = x_d[:, :, :inputs.size(2), :inputs.size(3)]
             x = x + x_d
 
+        # cbam calculate
+        if self._cbam:
+            x = self.cbam_module(x)
+
         # Skip connection and drop connect
         input_filters, output_filters = self._block_args.input_filters, self._block_args.output_filters
         if self.id_skip and self._block_args.stride == 1 and input_filters == output_filters:
@@ -155,13 +163,14 @@ class EfficientNet(nn.Module):
 
     """
 
-    def __init__(self, blocks_args=None, global_params=None, elastic: bool = False):
+    def __init__(self, blocks_args=None, global_params=None, elastic: bool = False, cbam: bool = False):
         super().__init__()
         assert isinstance(blocks_args, list), 'blocks_args should be a list'
         assert len(blocks_args) > 0, 'block args must be greater than 0'
         self._global_params = global_params
         self._blocks_args = blocks_args
         print('whether use elastic arch? {}'.format(elastic))
+        print('whether use cbam arch? {}'.format(cbam))
 
         # Get static or dynamic convolution depending on image size
         Conv2d = get_same_padding_conv2d(image_size=global_params.image_size)
@@ -188,11 +197,11 @@ class EfficientNet(nn.Module):
             )
 
             # The first block needs to take care of stride and filter size increase.
-            self._blocks.append(MBConvBlock(block_args, self._global_params, elastic))
+            self._blocks.append(MBConvBlock(block_args, self._global_params, elastic, cbam))
             if block_args.num_repeat > 1:
                 block_args = block_args._replace(input_filters=block_args.output_filters, stride=1)
             for _ in range(block_args.num_repeat - 1):
-                self._blocks.append(MBConvBlock(block_args, self._global_params, elastic))
+                self._blocks.append(MBConvBlock(block_args, self._global_params, elastic, cbam))
 
         # Head
         in_channels = block_args.output_filters  # output of final block
@@ -244,14 +253,14 @@ class EfficientNet(nn.Module):
         return x
 
     @classmethod
-    def from_name(cls, model_name, override_params=None, elastic: bool = False):
+    def from_name(cls, model_name, override_params=None, elastic: bool = False, cbam: bool = False):
         cls._check_model_name_is_valid(model_name)
         blocks_args, global_params = get_model_params(model_name, override_params)
-        return cls(blocks_args, global_params, elastic=elastic)
+        return cls(blocks_args, global_params, elastic=elastic, cbam=cbam)
 
     @classmethod
-    def from_pretrained(cls, model_name, num_classes=1000, in_channels=3, elastic: bool = False):
-        model = cls.from_name(model_name, override_params={'num_classes': num_classes}, elastic=elastic)
+    def from_pretrained(cls, model_name, num_classes=1000, in_channels=3, elastic: bool = False, cbam: bool = False):
+        model = cls.from_name(model_name, override_params={'num_classes': num_classes}, elastic=elastic, cbam=cbam)
         load_pretrained_weights(model, model_name, load_fc=(num_classes == 1000))
         if in_channels != 3:
             Conv2d = get_same_padding_conv2d(image_size=model._global_params.image_size)
@@ -260,8 +269,8 @@ class EfficientNet(nn.Module):
         return model
 
     @classmethod
-    def from_pretrained(cls, model_name, num_classes=1000, elastic: bool = False):
-        model = cls.from_name(model_name, override_params={'num_classes': num_classes}, elastic=elastic)
+    def from_pretrained(cls, model_name, num_classes=1000, elastic: bool = False, cbam: bool = False):
+        model = cls.from_name(model_name, override_params={'num_classes': num_classes}, elastic=elastic, cbam=cbam)
         load_pretrained_weights(model, model_name, load_fc=(num_classes == 1000))
 
         return model

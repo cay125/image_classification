@@ -328,7 +328,8 @@ class ImageClassificationService(PTServingBaseService):
 
         # self.model = models.__dict__['resnet50'](num_classes=54)
         # self.model = resnext101_elastic(num_classes=54)
-        self.model = EfficientNet.from_name('efficientnet-b5', override_params={'num_classes': 54}, elastic=True)
+        self.model = EfficientNet.from_name('efficientnet-b5', override_params={'num_classes': 54}, elastic=True,
+                                            cbam=True)
         self.use_cuda = False
         if torch.cuda.is_available():
             print('Using GPU for inference')

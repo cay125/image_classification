@@ -17,9 +17,11 @@ import time
 import utility
 import nets
 from efficientnet_pytorch import EfficientNet
+import grad_cam
 
 
-def train(train_loader: torch.utils.data.DataLoader, model: nn.Module, criterion: nn.Module, optimizer, epoch, f_id):
+def train(train_loader: torch.utils.data.DataLoader, model: nn.Module, criterion: nn.Module, optimizer, epoch, f_id,
+          begin):
     # switch to train mode
     model.train()
     loss_avg = utility.AverageMeter()
@@ -42,17 +44,18 @@ def train(train_loader: torch.utils.data.DataLoader, model: nn.Module, criterion
 
         loss_avg.update(loss.item())
         time_avg.update(time.time() - end)
+        begin.update(time.time())
         end = time.time()
 
         if i % params.display_interval == 0:
-            print('[{0}/{1}][{2}/{3}] loss: {4} loss_avg: {5} total: {6:.1f}min eta: {7:.1f}min'.format(
+            print('[{0}/{1}][{2}/{3}] loss: {4:.4f} loss_avg: {5:.4f} total: {6} eta: {7:.1f}min'.format(
                 epoch,
                 args.epoch,
                 i,
                 len(train_loader),
                 loss.item(),
                 loss_avg.avg,
-                time_avg.sum / 60.0,
+                begin,
                 time_avg.avg * (len(train_loader) * (args.epoch - epoch) - i - 1) / 60.0))
             if args.record == 'true':
                 f_id.write('{0} {1} {2}\n'.format(epoch, i, loss.item()))
@@ -71,6 +74,7 @@ if __name__ == '__main__':
     args.add_argument('--hard_sample_mining', help='enable hard sample mining', default='false', type=str)
     args.add_argument('--elastic', help='enable elastic arch', default='false', type=str)
     args.add_argument('--cbam', help='enable cbam arch', default='false', type=str)
+    args.add_argument('--show_grad', help='visualize cnn heatmap', default='false', type=str)
     args = args.parse_args()
     os.environ["CUDA_VISIBLE_DEVICES"] = args.cuda_device
     print('record loss: {}'.format(args.record))
@@ -164,10 +168,11 @@ if __name__ == '__main__':
             print('model being parallelize')
         model = model.to(device)
         criterion = criterion.to(device)
+        begin = utility.total_time(time.time())
         for epoch in range(args.epoch):
             if args.model_path is None:
                 utility.adjust_learning_rate(optimizer, epoch, params.lr)
-            train(train_loader, model, criterion, optimizer, epoch, f_id)
+            train(train_loader, model, criterion, optimizer, epoch, f_id, begin)
             if args.multiGPU == 'true' and torch.cuda.device_count() > 1:
                 torch.save(model.module.state_dict(), params.model_dir + 'training_net')
             else:
@@ -188,18 +193,21 @@ if __name__ == '__main__':
         torch.save(cp, params.model_dir + 'model_' + t)
         f_id.close()
     else:
-        model.load_state_dict(torch.load(args.model_path, map_location='cpu'))  # type:nn.Module
+        model.load_state_dict(torch.load(args.model_path, map_location='cpu')['state_dict'])  # type:nn.Module
         model.eval()
         img_sum, img_right_sum = [], []
         labels = os.listdir(valdir)
         model = model.to(device)
+        if args.show_grad == 'true':
+            model._conv_head.register_forward_hook(grad_cam.farward_hook)
+            model._conv_head.register_backward_hook(grad_cam.backward_hook)
         for label_index, label in enumerate(labels):
             files = os.listdir(valdir + label)
             img_sum.append(len(files))
             img_right_sum.append(0)
             for file in files:
-                img = cv2.imread(valdir + label + '/' + file)  # type:np.ndarray
-                img = cv2.resize(img, (224, 224))
+                img_ori = cv2.imread(valdir + label + '/' + file)  # type:np.ndarray
+                img = cv2.resize(img_ori, (224, 224))
                 img = img.astype(np.float) / 255.0
                 img = img.transpose(2, 0, 1)
                 img = img[::-1].copy()
@@ -210,6 +218,17 @@ if __name__ == '__main__':
                 _, index = res.max(0)
                 if idx_to_class[index.item()] == label:
                     img_right_sum[label_index] += 1
+
+                if args.show_grad == 'true':
+                    model.zero_grad()
+                    class_loss = grad_cam.comp_class_vec(res.unsqueeze(0))
+                    class_loss.backward()
+                    grads = grad_cam.grad_block[0].cpu().data.numpy().squeeze()
+                    fmap = grad_cam.fmap_block[0].cpu().data.numpy().squeeze()
+                    cam, img_show = grad_cam.gen_cam(fmap, grads, img_ori)
+                    cv2.imshow("cam", cam)
+                    cv2.imshow("img", img_show)
+                    cv2.waitKey(0)
             print('label {0} accuracy:{1:.3f}'.format(label, img_right_sum[label_index] / img_sum[label_index]))
         print('total accuracy:{0:.3f}'.format(sum(img_right_sum) / sum(img_sum)))
 

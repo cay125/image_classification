@@ -11,11 +11,12 @@ def farward_hook(module, input, output):
     fmap_block.append(output)
 
 
-def comp_class_vec(output_vec, index=None):
+def comp_class_vec(output_vec, index=None, device=torch.device('cpu')):
     """
     计算类向量
     :param output_vec: tensor
     :param index: int，指定类别
+    :param device: cpu or gpu
     :return: tensor
     """
     if not index:
@@ -24,7 +25,8 @@ def comp_class_vec(output_vec, index=None):
         index = np.array(index)
     index = index[np.newaxis, np.newaxis]
     index = torch.from_numpy(index)
-    one_hot = torch.zeros(1, 54).scatter_(1, index, 1)
+    index = index.to(device)
+    one_hot = torch.zeros(1, 54, device=device).scatter_(1, index, 1)
     one_hot.requires_grad = True
     class_vec = torch.sum(one_hot * output_vec)  # one_hot = 11.8605
 

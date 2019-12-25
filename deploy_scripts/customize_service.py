@@ -328,8 +328,7 @@ class ImageClassificationService(PTServingBaseService):
 
         # self.model = models.__dict__['resnet50'](num_classes=54)
         # self.model = resnext101_elastic(num_classes=54)
-        self.model = EfficientNet.from_name('efficientnet-b5', override_params={'num_classes': 54}, elastic=True,
-                                            cbam=True)
+        self.model = EfficientNet.from_name('efficientnet-b5', override_params={'num_classes': 54})
         self.use_cuda = False
         if torch.cuda.is_available():
             print('Using GPU for inference')
@@ -354,11 +353,10 @@ class ImageClassificationService(PTServingBaseService):
         self.model.eval()
 
         self.idx_to_class = checkpoint['idx_to_class']
-        self.normalize = transforms.Normalize(mean=[0.5, 0.5, 0.5],
-                                              std=[0.5, 0.5, 0.5])
+        self.normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
 
         self.transforms = transforms.Compose([
-            transforms.Resize(256),
+            transforms.Resize(224),
             transforms.CenterCrop(224),
             transforms.ToTensor(),
             self.normalize

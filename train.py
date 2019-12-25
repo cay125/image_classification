@@ -18,6 +18,24 @@ import utility
 import nets
 from efficientnet_pytorch import EfficientNet
 import grad_cam
+import torch.optim.lr_scheduler as lr_scheduler
+import label_smooth
+
+
+def val(_val_loader: torch.utils.data.DataLoader, model: nn.Module) -> float:
+    with torch.no_grad():
+        total, correct = 0, 0
+        model.eval()
+        for i, (images, target) in enumerate(_val_loader):
+            images, target = images.to(device), target.to(device)
+            output = model(images)
+            _, index = output.max(1)
+            index = index.squeeze()
+            total += images.shape[0]
+            correct += torch.sum(index == target).item()
+    acc = correct / total
+    print('validate accuracy: {:.3f}'.format(acc))
+    return acc
 
 
 def train(train_loader: torch.utils.data.DataLoader, model: nn.Module, criterion: nn.Module, optimizer, epoch, f_id,
@@ -75,6 +93,8 @@ if __name__ == '__main__':
     args.add_argument('--elastic', help='enable elastic arch', default='false', type=str)
     args.add_argument('--cbam', help='enable cbam arch', default='false', type=str)
     args.add_argument('--show_grad', help='visualize cnn heatmap', default='false', type=str)
+    args.add_argument('--val', help='validate while training', default='false', type=str)
+    args.add_argument('--label_smooth', help='whether use label smooth', default='false', type=str)
     args = args.parse_args()
     os.environ["CUDA_VISIBLE_DEVICES"] = args.cuda_device
     print('record loss: {}'.format(args.record))
@@ -108,8 +128,13 @@ if __name__ == '__main__':
         criterion = nn.CrossEntropyLoss(reduction='none')
     else:
         criterion = nn.CrossEntropyLoss()
-    optimizer = torch.optim.SGD(model.parameters(), params.lr if args.model_path is None else 0.001,
-                                momentum=params.momentum, weight_decay=params.weight_decay)
+    if args.label_smooth == 'true':
+        print('use label smooth method')
+        criterion = label_smooth.LabelSmoothSoftmaxCE()
+    # optimizer = torch.optim.SGD(model.parameters(), params.lr if args.model_path is None else 0.001,
+    #                             momentum=params.momentum, weight_decay=params.weight_decay)
+    optimizer = torch.optim.Adam(model.parameters(), 1e-3, betas=(0.9, 0.999), eps=1e-9)
+    scheduler = lr_scheduler.ReduceLROnPlateau(optimizer, mode='max', factor=0.7, patience=3, verbose=True)
 
     # Data loading code
     hostname = socket.gethostname()
@@ -121,13 +146,15 @@ if __name__ == '__main__':
     valdir = data_dir_root + 'val/'
     if not os.path.exists(data_dir_root):
         raise RuntimeError('DataSet not exists')
-    normalize = transforms.Normalize(mean=[0.5, 0.5, 0.5],
-                                     std=[0.5, 0.5, 0.5])
+    input_size = 224
+    normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                                     std=[0.229, 0.224, 0.225])
     train_dataset = datasets.ImageFolder(
         traindir,
         transforms.Compose([
-            transforms.RandomRotation(45),
-            transforms.RandomResizedCrop(224),
+            transforms.Resize(input_size),
+            transforms.CenterCrop(input_size),
+            transforms.RandomAffine(degrees=0, translate=(0.05, 0.05)),
             transforms.RandomHorizontalFlip(),
             transforms.ToTensor(),
             normalize,
@@ -143,8 +170,8 @@ if __name__ == '__main__':
     val_dataset = datasets.ImageFolder(
         valdir,
         transforms.Compose([
-            transforms.Resize(256),
-            transforms.CenterCrop(224),
+            transforms.Resize(input_size),
+            transforms.CenterCrop(input_size),
             transforms.ToTensor(),
             normalize,
         ]))
@@ -166,13 +193,21 @@ if __name__ == '__main__':
         if args.multiGPU == 'true' and torch.cuda.device_count() > 1:
             model = nn.DataParallel(model)
             print('model being parallelize')
+        best_acc = 0
+        best_model = None
         model = model.to(device)
         criterion = criterion.to(device)
         begin = utility.total_time(time.time())
         for epoch in range(args.epoch):
-            if args.model_path is None:
-                utility.adjust_learning_rate(optimizer, epoch, params.lr)
+            # if args.model_path is None:
+            #     utility.adjust_learning_rate(optimizer, epoch, params.lr)
             train(train_loader, model, criterion, optimizer, epoch, f_id, begin)
+            if args.val == 'true':
+                acc = val(val_loader, model)
+                scheduler.step(acc * 100)
+                if best_acc < acc:
+                    best_acc = acc
+                    best_model = model
             if args.multiGPU == 'true' and torch.cuda.device_count() > 1:
                 torch.save(model.module.state_dict(), params.model_dir + 'training_net')
             else:
@@ -184,13 +219,26 @@ if __name__ == '__main__':
             torch.save(model.module.state_dict(), params.model_dir + 'net_' + t)
             cp['state_dict'] = model.module.state_dict()
             cp['model'] = model.module
+            if best_model is not None:
+                best_cp = {}
+                best_cp['idx_to_class'] = idx_to_class
+                best_cp['state_dict'] = best_model.module.state_dict()
+                best_cp['model'] = model.module
+                torch.save(best_cp, params.model_dir + 'best_model_' + t)
         else:
             torch.save(model.state_dict(), params.model_dir + 'net_' + t)
             cp['state_dict'] = model.state_dict()
             cp['model'] = model
+            if best_model is not None:
+                best_cp = {}
+                best_cp['idx_to_class'] = idx_to_class
+                best_cp['state_dict'] = best_model.state_dict()
+                best_cp['model'] = model
+                torch.save(best_cp, params.model_dir + 'best_model_' + t)
         os.remove(params.model_dir + 'training_net')
         os.rename(params.model_dir + 'training_loss.txt', params.model_dir + 'loss_' + t + '.txt')
         torch.save(cp, params.model_dir + 'model_' + t)
+        f_id.write('{0} {1} {2}\n'.format(best_acc, best_acc, best_acc))
         f_id.close()
     else:
         model.load_state_dict(torch.load(args.model_path, map_location='cpu')['state_dict'])  # type:nn.Module
@@ -207,24 +255,26 @@ if __name__ == '__main__':
             img_right_sum.append(0)
             for file in files:
                 img_ori = cv2.imread(valdir + label + '/' + file)  # type:np.ndarray
-                img = cv2.resize(img_ori, (224, 224))
+                img = cv2.resize(img_ori, (input_size, input_size))
                 img = img.astype(np.float) / 255.0
                 img = img.transpose(2, 0, 1)
                 img = img[::-1].copy()
-                img_tensor = torch.from_numpy(img).float().unsqueeze(0)
-                img_tensor.sub_(0.5).div_(0.5)
+                img_tensor = torch.from_numpy(img).float()
+                # img_tensor.sub_(0.5).div_(0.5)
+                img_tensor = normalize(img_tensor).unsqueeze(0)
                 img_tensor = img_tensor.to(device)
                 res = model(img_tensor).squeeze()
                 _, index = res.max(0)
                 if idx_to_class[index.item()] == label:
                     img_right_sum[label_index] += 1
 
-                if args.show_grad == 'true':
+                if args.show_grad == 'true' and idx_to_class[index.item()] != label:
+                    print('true label: {0}  predict label: {1}'.format(label, idx_to_class[index.item()]))
                     model.zero_grad()
-                    class_loss = grad_cam.comp_class_vec(res.unsqueeze(0))
+                    class_loss = grad_cam.comp_class_vec(res.unsqueeze(0), None, device)
                     class_loss.backward()
-                    grads = grad_cam.grad_block[0].cpu().data.numpy().squeeze()
-                    fmap = grad_cam.fmap_block[0].cpu().data.numpy().squeeze()
+                    grads = grad_cam.grad_block[-1].cpu().data.numpy().squeeze()
+                    fmap = grad_cam.fmap_block[-1].cpu().data.numpy().squeeze()
                     cam, img_show = grad_cam.gen_cam(fmap, grads, img_ori)
                     cv2.imshow("cam", cam)
                     cv2.imshow("img", img_show)
